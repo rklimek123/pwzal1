@@ -39,6 +39,9 @@ public class MT implements TransactionManager {
 	private final ConcurrentMap<Thread, Transaction> activeTransactions;
 	private final ConcurrentMap<Resource, Transaction> whoHasAccess;
 	
+	// Taken when modifying the structure of a waiting graph
+	private final Object deadlockResolveLock = new Object();
+	
 	MT(
 			Collection<Resource> resources,
 			LocalTimeProvider timeProvider
@@ -70,6 +73,8 @@ public class MT implements TransactionManager {
 		else
 			activeTransactions.putIfAbsent(current, tr);
 	}
+	
+	
 	
 	@Override
 	public void operateOnResourceInCurrentTransaction(
@@ -106,15 +111,39 @@ public class MT implements TransactionManager {
 		
 		if (!currentTr.resourcesInUse.contains(resource)) {
 			synchronized (resource) {
-				while (whoHasAccess.getOrDefault(resource, null) != null) {
-					maniany z tym kto co jak czeka na kogo, wskazniki w Transaction
-					resource.wait(); // NIE OBSLUGUJE ZAKLESZCZENIA. Rzuca interruptedException
+				while ((Transaction hasResource = whoHasAccess.getOrDefault(resource, null)) != null) {
+					synchronized (deadlockResolveLock) {
+						currentTr.setWaitFor(hasResource);
+						
+						Transaction newest = currentTr;
+						Transaction nextTr = hasResource;
+						
+						while (nextTr != null || nextTr != currentTr) {
+							if (nextTr.isNewerThan(newest))
+								newest = nextTr;
+							
+							nextTr = nextTr.getNext();
+						}
+						
+						if (nextTr == currentTr) {
+							// deadlock found
+							newest.resolveDeadlock();
+						}
+					}
+					
+					resource.wait();
+					// or should changing waitingFor on currentTr happen when notifying the ones
+					// waiting for that resource? then we'd need some priority queue sorted by startingDate()
+					// to notify the oldest Transaction, and then to correct the connections in this Transaction.
+					// Analiza przeplotu potrzebna, czy naprawdę trzeba to robić??
+					
 				}
+				
 				
 				whoHasAccess.replace(resource, currentTr);
 				currentTr.resourcesInUse.add(resource);
 			}
-		}// w ogole przerwan nie obsluguje, interrupted
+		}
 		
 		operation.execute(resource);
 		currentTr.stackTrace.add(new Pair<ResourceOperation, Resource>(operation, resource));
