@@ -150,7 +150,10 @@ public class Transaction implements Comparable<Transaction> {
 	
 	public void setWaitFor(Transaction waiting) {
 		waitingFor = waiting;
-		waiting.addWaiting(this);
+		
+		if (waiting != null) {
+			waiting.addWaiting(this);
+		}
 	}
 	
 	public Transaction getNext() {
