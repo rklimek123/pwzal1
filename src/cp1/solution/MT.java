@@ -8,9 +8,9 @@
 package cp1.solution;
 
 import java.util.Collection;
-import java.util.HashSet;
-import java.util.Set;
-import java.util.Stack;
+import java.util.Iterator;
+import java.util.PriorityQueue;
+import java.util.Queue;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -38,11 +38,12 @@ public class MT implements TransactionManager {
 
 	private final ConcurrentMap<Thread, Transaction> activeTransactions;
 	private final ConcurrentMap<Resource, Transaction> whoHasAccess;
+	private final ConcurrentMap<Resource, Queue<Transaction>> whoWaitsOnResource;
 	
 	// Taken when modifying the structure of a waiting graph
 	private final Object deadlockResolveLock = new Object();
 	
-	MT(
+	protected MT(
 			Collection<Resource> resources,
 			LocalTimeProvider timeProvider
 	) {
@@ -51,9 +52,11 @@ public class MT implements TransactionManager {
 		
 		activeTransactions = new ConcurrentHashMap<Thread, Transaction>();
 		whoHasAccess = new ConcurrentHashMap<Resource, Transaction>();
+		whoWaitsOnResource = new ConcurrentHashMap<Resource, Queue<Transaction>>();
 		
 		for (Resource r: resources) {
 			whoHasAccess.putIfAbsent(r, null);
+			whoWaitsOnResource.putIfAbsent(r, new PriorityQueue<Transaction>());
 		}
 	}
 	
@@ -109,9 +112,11 @@ public class MT implements TransactionManager {
 		Transaction currentTr = tryGetActiveTransaction();
 		assert currentTr != null;
 		
-		if (!currentTr.resourcesInUse.contains(resource)) {
+		if (!currentTr.isUsingResource(resource)) {
 			synchronized (resource) {
-				while ((Transaction hasResource = whoHasAccess.getOrDefault(resource, null)) != null) {
+				while (whoHasAccess.getOrDefault(resource, null) != null || currentTr.isFlgLocked()) {
+					Transaction hasResource = whoHasAccess.getOrDefault(resource, null);
+					
 					synchronized (deadlockResolveLock) {
 						currentTr.setWaitFor(hasResource);
 						
@@ -119,7 +124,7 @@ public class MT implements TransactionManager {
 						Transaction nextTr = hasResource;
 						
 						while (nextTr != null || nextTr != currentTr) {
-							if (nextTr.isNewerThan(newest))
+							if (nextTr.compareTo(newest) > 0)
 								newest = nextTr;
 							
 							nextTr = nextTr.getNext();
@@ -131,37 +136,53 @@ public class MT implements TransactionManager {
 						}
 					}
 					
-					resource.wait();
-					// or should changing waitingFor on currentTr happen when notifying the ones
-					// waiting for that resource? then we'd need some priority queue sorted by startingDate()
-					// to notify the oldest Transaction, and then to correct the connections in this Transaction.
-					// Analiza przeplotu potrzebna, czy naprawdę trzeba to robić??
+					Queue<Transaction> rQueue = whoWaitsOnResource.getOrDefault(resource, null);
+					assert rQueue != null;
 					
+					rQueue.add(currentTr);
+					currentTr.lock();
+					
+					resource.wait();
 				}
 				
-				
 				whoHasAccess.replace(resource, currentTr);
-				currentTr.resourcesInUse.add(resource);
+				currentTr.addResource(resource);
 			}
 		}
 		
 		operation.execute(resource);
-		currentTr.stackTrace.add(new Pair<ResourceOperation, Resource>(operation, resource));
-		
+		currentTr.registerOperation(operation, resource);
 	}
 	
-	private void freeResource(Resource r) {
+	private void unlockResource(Resource r) {
 		synchronized (r) {
 			whoHasAccess.replace(r, null);
-			r.notify();
+			
+			Queue<Transaction> rQueue = whoWaitsOnResource.getOrDefault(r, null);
+			
+			if (!rQueue.isEmpty()) {
+				Transaction oldestTr = rQueue.remove();
+				
+				synchronized (deadlockResolveLock) {
+					oldestTr.setWaitFor(null);
+				}
+				
+				oldestTr.unlock();
+				r.notifyAll();
+			}
 		}
 	}
 	
-	private void freeCurrentResources() {
+	private void unlockCurrentResources() {
 		Transaction currentTr = tryGetActiveTransaction();
+		Iterator<Resource> it = currentTr.getResourcesIterator();
+		// tutaj i tam wyzej w unlockresource, mozliwe ze trzeba bedzie zalozyc locka na transakcje
+		// wynika to z tego, ze zmieniamy kolekcje resourcow. no ale moze iterator ogarnie, nie wiem
+		// raczej nie
 		
-		for (Resource r: currentTr.resourcesInUse) {
-			freeResource(r);
+		while (it.hasNext()) {
+			Resource r = it.next();
+			unlockResource(r);
 		}
 	}
 	
@@ -181,7 +202,7 @@ public class MT implements TransactionManager {
 		if (isTransactionAborted())
 			throw new ActiveTransactionAborted();
 		
-		freeCurrentResources();
+		unlockCurrentResources();
 		removeActiveTransaction();
 	}
 	
@@ -189,20 +210,18 @@ public class MT implements TransactionManager {
 	public void rollbackCurrentTransaction() {
 		Transaction currentTr = tryGetActiveTransaction();
 		
-		while (!(currentTr.stackTrace.empty())) {
-			Pair<ResourceOperation, Resource> trace = currentTr.stackTrace.pop();
+		while (!currentTr.isStackTraceEmpty()) {
+			Pair<ResourceOperation, Resource> trace = currentTr.stackTracePop();
 			
 			ResourceOperation operation = trace.first();
 			Resource resource = trace.second();
 			
 			operation.undo(resource);
 			
-			//freeResource(resource); /////// TUTAJ ZROBIC TRZEBA JAKIS LICZNIK ILE RAZY UZYTA TA
-									// ZMIENNA, A POTEM JAK OSTATNIA JEST ROLLBACKOWANA TO WTEDY
-									// DOPIERO ZWALNIAM TEN ZASOB
+			if (currentTr.rollbackResource(resource))
+				unlockResource(resource);
 		}
 		
-		freeCurrentResources(); // ROZWIAZANIE NA PALE, TRZEBA ZROBIC TAK JAK WYZEJ
 		removeActiveTransaction();
 	}
 	
@@ -220,7 +239,7 @@ public class MT implements TransactionManager {
 			result = true;
 		}
 		
-		return result;	
+		return result;
 	}
 	
 	@Override
@@ -228,7 +247,7 @@ public class MT implements TransactionManager {
 		boolean result = false;
 		Transaction tr = tryGetActiveTransaction();
 		
-		if (tr != null && tr.isAborted) {
+		if (tr != null && tr.isFlgAborted()) {
 			result = true;
 		}
 		
