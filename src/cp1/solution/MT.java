@@ -35,6 +35,8 @@ public class MT implements TransactionManager {
 	
 	private final Collection<Resource> resources;
 	private final LocalTimeProvider timeProvider;
+	
+	private static Transaction dummyTransaction = new Transaction();
 
 	private final ConcurrentMap<Thread, Transaction> activeTransactions;
 	private final ConcurrentMap<Resource, Transaction> whoHasAccess;
@@ -55,7 +57,7 @@ public class MT implements TransactionManager {
 		whoWaitsOnResource = new ConcurrentHashMap<Resource, Queue<Transaction>>();
 		
 		for (Resource r: resources) {
-			whoHasAccess.putIfAbsent(r, null);
+			whoHasAccess.putIfAbsent(r, dummyTransaction);
 			whoWaitsOnResource.putIfAbsent(r, new PriorityQueue<Transaction>());
 		}
 	}
@@ -114,8 +116,11 @@ public class MT implements TransactionManager {
 		
 		if (!currentTr.isUsingResource(resource)) {
 			synchronized (resource) {
-				while (whoHasAccess.getOrDefault(resource, null) != null || currentTr.isFlgLocked()) {
+				while (whoHasAccess.getOrDefault(resource, dummyTransaction) != dummyTransaction ||
+						currentTr.isFlgLocked()) {
+					
 					Transaction hasResource = whoHasAccess.getOrDefault(resource, null);
+					assert hasResource != null;
 					
 					synchronized (deadlockResolveLock) {
 						currentTr.setWaitFor(hasResource);
@@ -156,9 +161,10 @@ public class MT implements TransactionManager {
 	
 	private void unlockResource(Resource r) {
 		synchronized (r) {
-			whoHasAccess.replace(r, null);
+			whoHasAccess.replace(r, dummyTransaction);
 			
 			Queue<Transaction> rQueue = whoWaitsOnResource.getOrDefault(r, null);
+			assert rQueue != null;
 			
 			if (!rQueue.isEmpty()) {
 				Transaction oldestTr = rQueue.remove();

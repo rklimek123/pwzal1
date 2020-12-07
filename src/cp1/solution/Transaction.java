@@ -94,6 +94,12 @@ public class Transaction implements Comparable<Transaction> {
 		this.myThread = Thread.currentThread();
 	}
 	
+	// dummy
+	protected Transaction() {
+		startDate = 0;
+		myThread = null;
+	}
+	
 	// Long for how many times the resource has been operated on.
 	private final Map<Resource, Long> resourcesInUse = new HashMap<Resource, Long>();
 	
