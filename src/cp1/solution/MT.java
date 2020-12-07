@@ -128,7 +128,7 @@ public class MT implements TransactionManager {
 						Transaction newest = currentTr;
 						Transaction nextTr = hasResource;
 						
-						while (nextTr != null || nextTr != currentTr) {
+						while (nextTr != null && nextTr != currentTr) {
 							if (nextTr.compareTo(newest) > 0)
 								newest = nextTr;
 							
@@ -215,6 +215,10 @@ public class MT implements TransactionManager {
 	@Override
 	public void rollbackCurrentTransaction() {
 		Transaction currentTr = tryGetActiveTransaction();
+		
+		if (currentTr == null) {
+			return;
+		}
 		
 		while (!currentTr.isStackTraceEmpty()) {
 			Pair<ResourceOperation, Resource> trace = currentTr.stackTracePop();
